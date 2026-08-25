@@ -1,7 +1,7 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- Development reset. Remove this DROP block and use migrations before production deployment.
-DROP TABLE IF EXISTS audit_logs, adjustments, payment_allocations, payments, maintenance_dues,
+DROP TABLE IF EXISTS audit_logs, adjustments, expenses, payment_allocations, payments, maintenance_dues,
   billing_periods, maintenance_plans, flat_owners, owners, admin_users, flats, buildings,
   communities CASCADE;
 
@@ -165,6 +165,25 @@ CREATE TABLE collection_payment_allocations (
   PRIMARY KEY (payment_id, collection_due_id)
 );
 
+CREATE TABLE expenses (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  community_id UUID NOT NULL REFERENCES communities(id),
+  category VARCHAR(120) NOT NULL,
+  source_type VARCHAR(20) NOT NULL DEFAULT 'maintenance' CHECK (source_type IN ('maintenance', 'collection')),
+  collection_id UUID REFERENCES community_collections(id),
+  payment_mode VARCHAR(20) NOT NULL DEFAULT 'cash' CHECK (payment_mode IN ('cash', 'bank')),
+  description TEXT,
+  amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+  expense_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  status VARCHAR(20) NOT NULL DEFAULT 'posted' CHECK (status IN ('posted', 'reversed')),
+  created_by UUID REFERENCES admin_users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE expenses
+  ADD CONSTRAINT expenses_collection_source_check
+  CHECK ((source_type = 'maintenance' AND collection_id IS NULL) OR (source_type = 'collection' AND collection_id IS NOT NULL));
+
 CREATE TABLE adjustments (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   due_id UUID NOT NULL REFERENCES maintenance_dues(id),
@@ -190,6 +209,7 @@ CREATE INDEX idx_flat_owners_owner ON flat_owners(owner_id);
 CREATE INDEX idx_dues_flat_status_month ON maintenance_dues(flat_id, status, due_month);
 CREATE INDEX idx_collection_dues_flat_status ON collection_dues(flat_id, status);
 CREATE INDEX idx_payments_flat_paid_at ON payments(flat_id, paid_at DESC);
+CREATE INDEX idx_expenses_community_date ON expenses(community_id, expense_date DESC);
 CREATE INDEX idx_audit_entity ON audit_logs(entity_type, entity_id, created_at DESC);
 
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS TRIGGER AS $$
@@ -204,3 +224,4 @@ CREATE TRIGGER owners_updated_at BEFORE UPDATE ON owners FOR EACH ROW EXECUTE FU
 CREATE TRIGGER communities_updated_at BEFORE UPDATE ON communities FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER admin_users_updated_at BEFORE UPDATE ON admin_users FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER dues_updated_at BEFORE UPDATE ON maintenance_dues FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER expenses_updated_at BEFORE UPDATE ON expenses FOR EACH ROW EXECUTE FUNCTION set_updated_at();

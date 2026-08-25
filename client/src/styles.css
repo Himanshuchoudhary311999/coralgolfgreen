@@ -28,6 +28,73 @@ h3 { margin: 0; color: #2d3748; font-size: 20px; letter-spacing: -.5px; }
 .intro { display: flex; justify-content: space-between; align-items: end; gap: 28px; padding: 38px 8px 28px; }
 .intro .eyebrow { color: rgba(255, 255, 255, .75); }
 .intro-copy { width: 270px; margin: 0 0 5px; color: rgba(255, 255, 255, .85); font-size: 13px; line-height: 1.65; }
+.admin-menu { position: sticky; top: 0; z-index: 8; display: flex; gap: 6px; overflow-x: auto; padding: 8px; margin: 0 0 18px; border: 1px solid rgba(255, 255, 255, .35); border-radius: 12px; background: rgba(15, 57, 49, .9); box-shadow: 0 8px 20px rgba(10, 46, 38, .14); scrollbar-width: none; }
+.admin-menu::-webkit-scrollbar { display: none; }
+.admin-menu button { flex: none; padding: 9px 13px; border: 1px solid transparent; border-radius: 7px; color: rgba(255, 255, 255, .72); background: transparent; font-size: 11px; font-weight: 700; white-space: nowrap; transition: color .2s, background .2s, border-color .2s; }
+.admin-menu button:hover, .admin-menu button.active { border-color: rgba(255, 255, 255, .22); color: #19332f; background: #f8f3e8; }
+.dashboard, .collection-create, .collection-selection, .workspace { scroll-margin-top: 70px; }
+.expense-page { display: none; scroll-margin-top: 70px; }
+.admin-view-overview .collection-create, .admin-view-overview .collection-selection, .admin-view-overview .workspace, .admin-view-overview .expense-page { display: none; }
+.admin-view-payment .dashboard, .admin-view-payment .collection-create, .admin-view-payment .expense-page { display: none; }
+.admin-view-collection .workspace, .admin-view-collection .collection-selection { display: none; }
+.admin-view-collection .dashboard > *:not(.dashboard-grid), .admin-view-collection .dashboard-grid:not(:has(#collections)) { display: none; }
+.admin-view-collection .dashboard-grid:has(#collections) > *:not(#collections) { display: none; }
+.admin-view-expense .collection-create, .admin-view-expense .collection-selection, .admin-view-expense .workspace { display: none; }
+.admin-view-expense .expense-page { display: block; }
+.admin-view-expense .dashboard { display: none; }
+.admin-view-expense .dashboard > *:not(.dashboard-grid), .admin-view-expense .dashboard-grid:not(:has(#expenses)) { display: none; }
+.admin-view-expense .dashboard-grid:has(#expenses) > *:not(#expenses) { display: none; }
+.admin-view-history .collection-create, .admin-view-history .collection-selection, .admin-view-history .workspace, .admin-view-history .expense-page { display: none; }
+.admin-view-history .dashboard > *:not(.dashboard-grid), .admin-view-history .dashboard-grid:not(:has(#history)) { display: none; }
+.admin-view-history .dashboard-grid:has(#history) > *:not(#history) { display: none; }
+.dashboard { padding: 24px 26px; margin-bottom: 18px; border: 1px solid rgba(255, 255, 255, .65); border-radius: 16px; background: #fbfaf6; box-shadow: 0 20px 40px rgba(10, 46, 38, .16); }
+.dashboard-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-bottom: 18px; border-bottom: 1px solid #edf0f5; }
+.dashboard-heading h3 { margin: 0; }
+.dashboard-net { color: #2d806e; font-size: 12px; font-weight: 700; }
+.dashboard-kpis { display: grid; grid-template-columns: repeat(6, 1fr); gap: 1px; margin: 18px 0; overflow: hidden; border: 1px solid #e2e8df; border-radius: 10px; background: #e2e8df; }
+.dashboard-kpis div { min-width: 0; padding: 14px 12px; background: #f8faf5; }
+.dashboard-kpis strong { display: block; overflow: hidden; color: #19332f; font-family: 'Space Grotesk', sans-serif; font-size: 17px; text-overflow: ellipsis; white-space: nowrap; }
+.dashboard-kpis span { display: block; margin-top: 5px; color: #7a8596; font-size: 10px; line-height: 1.2; }
+.dashboard-kpis .expense-kpi strong, .expense-text { color: #b45309; }
+.dashboard-grid { display: grid; grid-template-columns: 1.35fr .85fr; gap: 18px; margin-top: 18px; }
+.dashboard-table, .expense-form { min-width: 0; padding: 16px; border: 1px solid #e2e8df; border-radius: 10px; background: #fff; }
+.dashboard-section-title { margin-bottom: 12px; color: #2d3748; font-size: 12px; font-weight: 700; }
+.table-scroll { overflow-x: auto; }
+.dashboard table { width: 100%; border-collapse: collapse; color: #596273; font-size: 11px; white-space: nowrap; }
+.dashboard th { color: #7a8596; font-size: 9px; letter-spacing: .05em; text-align: left; text-transform: uppercase; }
+.dashboard th, .dashboard td { padding: 9px 7px; border-bottom: 1px solid #edf0f5; }
+.dashboard tbody tr:last-child td { border-bottom: 0; }
+.dashboard td:not(:first-child) { font-family: 'IBM Plex Mono', monospace; text-align: right; }
+.dashboard .balance-table th:not(:first-child), .dashboard .balance-table td:not(:first-child) { text-align: center; }
+.dashboard .field-label { margin-top: 10px; }
+.dashboard input { display: block; width: 100%; height: 40px; padding: 0 10px; margin-top: 6px; border: 1.5px solid #e2e8f0; border-radius: 8px; outline: 0; color: #374151; font-size: 12px; }
+.dashboard input:focus { border-color: #2d806e; box-shadow: 0 0 0 3px rgba(45, 128, 110, .12); }
+.dashboard select { display: block; width: 100%; height: 42px; padding: 0 34px 0 11px; margin-top: 6px; border: 1.5px solid #2d806e; border-radius: 8px; outline: 0; color: #19332f; background: #edf7f1; font-size: 12px; font-weight: 600; appearance: auto; }
+.dashboard select:focus { border-color: #d16d3b; box-shadow: 0 0 0 3px rgba(209, 109, 59, .14); }
+.dashboard select option { color: #19332f; background: #fff; font-weight: 500; }
+.expense-form .advance-button { width: 100%; justify-content: center; margin-top: 14px; }
+.expense-page { width: min(100%, 720px); margin: 0 auto 18px; }
+.expense-page .expense-form { padding: 26px; border: 1px solid rgba(255, 255, 255, .65); border-radius: 16px; box-shadow: 0 20px 40px rgba(10, 46, 38, .16); }
+.expense-page .dashboard-section-title { padding-bottom: 14px; margin-bottom: 18px; border-bottom: 1px solid #edf0f5; color: #19332f; font-family: 'Space Grotesk', sans-serif; font-size: 20px; }
+.expense-page .field-label { margin-top: 15px; }
+.expense-page input, .expense-page select { display: block; width: 100%; height: 46px; padding: 0 12px; margin-top: 7px; border: 1.5px solid #dbe4df; border-radius: 9px; outline: 0; color: #19332f; background: #fff; font-size: 13px; }
+.expense-page select { border-color: #2d806e; background: #edf7f1; font-weight: 600; }
+.expense-page input:focus, .expense-page select:focus { border-color: #d16d3b; box-shadow: 0 0 0 3px rgba(209, 109, 59, .14); }
+.expense-page .advance-button { height: 48px; margin-top: 22px; }
+.expense-source-bar { display: flex; align-items: end; gap: 18px; padding: 16px 20px; margin: 0 8px 18px; border: 1px solid rgba(255, 255, 255, .65); border-radius: 12px; background: #fbfaf6; box-shadow: 0 12px 24px rgba(10, 46, 38, .12); }
+.expense-source-bar .field-label { flex: 0 1 320px; margin: 0; }
+.expense-source-bar select { display: block; width: 100%; height: 40px; padding: 0 10px; margin-top: 6px; border: 1.5px solid #e2e8f0; border-radius: 8px; outline: 0; color: #374151; background: #fff; font-size: 12px; }
+.expense-source-bar span { padding-bottom: 10px; color: #6b7280; font-size: 11px; }
+.dashboard-empty { margin: 0; color: #8a95a5; font-size: 12px; }
+.collection-status { padding: 3px 6px; border-radius: 4px; color: #166534; background: #dcfce7; font-size: 9px; text-transform: uppercase; }
+.collection-status.closed { color: #991b1b; background: #fee2e2; }
+.expense-list { display: grid; gap: 9px; }
+.expense-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 9px; border-bottom: 1px solid #edf0f5; }
+.expense-item:last-child { padding-bottom: 0; border-bottom: 0; }
+.expense-item strong, .expense-item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.expense-item strong { color: #374151; font-size: 12px; }
+.expense-item small { max-width: 180px; margin-top: 3px; color: #8a95a5; font-size: 10px; }
+.expense-item b { flex: none; color: #b45309; font-family: 'IBM Plex Mono', monospace; font-size: 12px; }
 
 .workspace { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(320px, .8fr); gap: 18px; align-items: start; }
 .panel { padding: 30px; border: 1px solid rgba(255, 255, 255, .65); border-radius: 16px; background: #fbfaf6; box-shadow: 0 20px 40px rgba(10, 46, 38, .16); }
@@ -123,10 +190,17 @@ legend { padding: 0; }
   .workspace { grid-template-columns: 1fr; }
   .summary-panel { position: static; }
   .panel { padding: 22px; }
+  .dashboard { padding: 22px; }
+  .dashboard-kpis { grid-template-columns: repeat(3, 1fr); }
+  .dashboard-grid { grid-template-columns: 1fr; }
+  .expense-page .expense-form { padding: 22px; }
 }
 
 @media (max-width: 520px) {
   .collection-fields { grid-template-columns: 1fr; }
+  .dashboard { padding: 18px; }
+  .dashboard-heading { align-items: flex-start; flex-direction: column; }
+  .dashboard-kpis { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (max-width: 440px) {
