@@ -194,6 +194,16 @@ CREATE TABLE adjustments (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE expense_categories (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  community_id UUID NOT NULL REFERENCES communities(id),
+  name VARCHAR(120) NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by UUID REFERENCES admin_users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (community_id, name)
+);
+
 CREATE TABLE audit_logs (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   actor_id UUID REFERENCES admin_users(id),

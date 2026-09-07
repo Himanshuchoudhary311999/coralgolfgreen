@@ -1,7 +1,6 @@
 import 'dotenv/config';
 
 const lateFeeStartDate = process.env.LATE_FEE_START_DATE || '2026-08-10';
-const lateFeeMonth = process.env.LATE_FEE_MONTH || '2026-08-01';
 const lateFeePerDay = Number(process.env.LATE_FEE_PER_DAY || 20);
 
 function toUtcDate(value) {
@@ -21,14 +20,26 @@ function calendarDaysBetween(start, end) {
 
 export function calculateLateFee(dueMonth, today = new Date()) {
   const dueDate = toUtcDate(dueMonth);
-  const feeMonth = toUtcDate(lateFeeMonth);
   const startDate = toUtcDate(lateFeeStartDate);
   const currentDate = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const monthlyCutoff = new Date(Date.UTC(
+    dueDate.getUTCFullYear(),
+    dueDate.getUTCMonth(),
+    10
+  ));
+  const rolloutMonth = new Date(Date.UTC(
+    startDate.getUTCFullYear(),
+    startDate.getUTCMonth(),
+    1
+  ));
+  const feeStartDate = monthlyCutoff > startDate ? monthlyCutoff : startDate;
 
-  if (dueDate.getUTCFullYear() !== feeMonth.getUTCFullYear()
-    || dueDate.getUTCMonth() !== feeMonth.getUTCMonth()
-    || currentDate <= startDate) return 0;
-  return calendarDaysBetween(startDate, currentDate) * lateFeePerDay;
+  // Late fees apply when:
+  // 1. The month's cutoff has passed
+  // 2. The month was covered by the rollout start date
+  if (dueDate < rolloutMonth || currentDate <= feeStartDate) return 0;
+  
+  return calendarDaysBetween(feeStartDate, currentDate) * lateFeePerDay;
 }
 
 export function feePolicy() {

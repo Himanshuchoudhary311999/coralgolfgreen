@@ -14,17 +14,19 @@ Three-tier maintenance payment application:
 
 ## Fee rule
 
-The API applies late fees only to unpaid August 2026 maintenance dues. With the default configuration, the cutoff is `2026-08-10`:
+The API applies late fees to unpaid maintenance dues from the rollout date onward. Each month's cutoff is its 10th day. With the default rollout date of `2026-08-10`:
 
+- July 2026: no fee because it predates the rollout
 - 10 August: no fee
-- 11 August onward: `20` per calendar day for each unpaid due
+- 11 August onward: `20` per calendar day for the August due
+- 10 September: no fee
+- 11 September onward: `20` per calendar day for the September due
 - paid dues stop accumulating fees because fees are calculated only while the due is unpaid
 
 Change `server/.env` if the intended year or amount is different:
 
 ```env
 LATE_FEE_START_DATE=2026-08-10
-LATE_FEE_MONTH=2026-08-01
 LATE_FEE_PER_DAY=20
 ```
 

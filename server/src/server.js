@@ -56,16 +56,21 @@ function money(value) {
 
 function presentDue(row) {
   const maintenanceDue = money(Number(row.amount) - Number(row.paid_amount || 0));
-  const lateFee = maintenanceDue > 0
-    ? (Number(row.adjustment_amount || 0) || calculateLateFee(row.due_month))
-    : 0;
+  const calculatedLateFee = calculateLateFee(row.due_month);
+  const penaltyAmount = Number(row.penalty_amount || 0);
+  const waivedLateFee = Number(row.waived_late_fee || 0);
+  const paidLateFee = Number(row.paid_late_fee || 0);
+  const lateFee = row.has_late_fee_waiver
+    ? 0
+    : money(Math.max(0, calculatedLateFee + penaltyAmount - waivedLateFee - paidLateFee));
   return {
     id: row.id,
     dueMonth: row.due_month,
     amount: money(row.amount),
     paidAmount: money(row.paid_amount || 0),
+    paidLateFee: money(paidLateFee),
     maintenanceDue,
-    lateFee: money(lateFee),
+    lateFee,
     totalDue: money(maintenanceDue + lateFee),
     status: row.status
   };
@@ -147,8 +152,11 @@ async function loadDues(client, flatId, dueIds = null) {
   }
   const { rows } = await client.query(`
     SELECT d.id, d.due_month::text AS due_month, d.amount, d.status,
-      COALESCE(SUM(CASE WHEN p.status = 'posted' THEN pa.maintenance_amount ELSE 0 END), 0) AS paid_amount
-      , COALESCE((SELECT SUM(a.amount) FROM adjustments a WHERE a.due_id = d.id AND a.adjustment_type = 'penalty'), 0) AS adjustment_amount
+      COALESCE(SUM(CASE WHEN p.status = 'posted' THEN pa.maintenance_amount ELSE 0 END), 0) AS paid_amount,
+      COALESCE(SUM(CASE WHEN p.status = 'posted' THEN pa.late_fee_amount ELSE 0 END), 0) AS paid_late_fee,
+      COALESCE((SELECT SUM(a.amount) FROM adjustments a WHERE a.due_id = d.id AND a.adjustment_type = 'penalty'), 0) AS penalty_amount,
+      COALESCE((SELECT SUM(-a.amount) FROM adjustments a WHERE a.due_id = d.id AND a.adjustment_type = 'waiver' AND a.reason LIKE 'Late fee waiver:%'), 0) AS waived_late_fee,
+      EXISTS (SELECT 1 FROM adjustments a WHERE a.due_id = d.id AND a.adjustment_type = 'waiver' AND a.reason LIKE 'Late fee waiver:%') AS has_late_fee_waiver
     FROM maintenance_dues d
     LEFT JOIN payment_allocations pa ON pa.due_id = d.id
     LEFT JOIN payments p ON p.id = pa.payment_id
@@ -161,7 +169,7 @@ async function loadDues(client, flatId, dueIds = null) {
 
 async function loadAdvancedDues(client, flatId) {
   const { rows } = await client.query(`
-    SELECT id, due_month::text AS due_month, amount, status, 0 AS paid_amount, 0 AS adjustment_amount
+    SELECT id, due_month::text AS due_month, amount, status, 0 AS paid_amount, 0 AS paid_late_fee, 0 AS penalty_amount, 0 AS waived_late_fee, FALSE AS has_late_fee_waiver
     FROM maintenance_dues
     WHERE flat_id = $1 AND status = 'advanced_paid'
     ORDER BY due_month ASC
@@ -171,7 +179,7 @@ async function loadAdvancedDues(client, flatId) {
 
 async function loadPaidDues(client, flatId) {
   const { rows } = await client.query(`
-    SELECT id, due_month::text AS due_month, amount, status, 0 AS paid_amount, 0 AS adjustment_amount
+    SELECT id, due_month::text AS due_month, amount, status, 0 AS paid_amount, 0 AS paid_late_fee, 0 AS penalty_amount, 0 AS waived_late_fee, FALSE AS has_late_fee_waiver
     FROM maintenance_dues
     WHERE flat_id = $1 AND status = 'paid'
     ORDER BY due_month ASC
@@ -207,12 +215,96 @@ app.get('/api/health', async (_req, res) => {
 
 app.get('/api/config', requireAdmin, (_req, res) => res.json({ feePolicy: feePolicy() }));
 
+app.get('/api/expense-categories', requireAdmin, async (_req, res, next) => {
+  try {
+    const { rows } = await pool.query(`SELECT id, name, active FROM expense_categories WHERE active = TRUE ORDER BY name`);
+    res.json({ categories: rows });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/expense-categories', requireAdmin, async (req, res, next) => {
+  const name = String(req.body.name || '').trim();
+  if (!name || name.length > 120) return res.status(400).json({ message: 'Category name is required and must be 120 characters or fewer' });
+  try {
+    const { rows: communities } = await pool.query('SELECT community_id FROM flats WHERE status = \'active\' ORDER BY community_id LIMIT 1');
+    if (!communities[0]) return res.status(409).json({ message: 'No active community is configured' });
+    const result = await pool.query(`INSERT INTO expense_categories (community_id, name, created_by) VALUES ($1, $2, $3) RETURNING id, name, active`, [communities[0].community_id, name, req.admin.sub]);
+    res.status(201).json({ category: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ message: 'This category already exists' });
+    next(error);
+  }
+});
+
+app.patch('/api/expense-categories/:categoryId', requireAdmin, async (req, res, next) => {
+  const name = String(req.body.name || '').trim();
+  if (!name || name.length > 120) return res.status(400).json({ message: 'Category name is required and must be 120 characters or fewer' });
+  try {
+    const result = await pool.query(`UPDATE expense_categories SET name = $2 WHERE id = $1 AND active = TRUE RETURNING id, name, active`, [req.params.categoryId, name]);
+    if (!result.rows[0]) return res.status(404).json({ message: 'Category not found' });
+    res.json({ category: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ message: 'This category already exists' });
+    next(error);
+  }
+});
+
+app.get('/api/reports/outstanding', requireAdmin, async (req, res, next) => {
+  const reportMonth = String(req.query.month || new Date().toISOString().slice(0, 7));
+  if (!/^\d{4}-\d{2}$/.test(reportMonth)) {
+    return res.status(400).json({ message: 'month must use YYYY-MM format' });
+  }
+  const reportDate = `${reportMonth}-01`;
+  try {
+    await ensureCurrentMonthDues();
+    const { rows: flats } = await pool.query(`
+      SELECT f.id, f.flat_no, o.full_name AS owner_name
+      FROM flats f
+      LEFT JOIN flat_owners fo ON fo.flat_id = f.id AND fo.is_primary = TRUE AND fo.valid_to IS NULL
+      LEFT JOIN owners o ON o.id = fo.owner_id
+      WHERE f.status = 'active'
+      ORDER BY f.flat_no
+    `);
+    const rows = (await Promise.all(flats.map(async (flat) => {
+      const dueRows = await loadDues(pool, flat.id);
+      const dues = dueRows
+        .filter((row) => row.due_month <= reportDate)
+        .map(presentDue)
+        .filter((due) => due.totalDue > 0);
+      if (!dues.length) return null;
+      return {
+        flatNo: flat.flat_no,
+        ownerName: flat.owner_name,
+        pendingMonths: dues.map((due) => ({
+          dueMonth: due.dueMonth,
+          maintenanceDue: due.maintenanceDue,
+          lateFee: due.lateFee,
+          totalDue: due.totalDue,
+        })),
+        maintenanceDue: money(dues.reduce((sum, due) => sum + due.maintenanceDue, 0)),
+        lateFees: money(dues.reduce((sum, due) => sum + due.lateFee, 0)),
+        totalDue: money(dues.reduce((sum, due) => sum + due.totalDue, 0)),
+      };
+    }))).filter(Boolean);
+    res.json({
+      reportMonth,
+      rows,
+      totals: {
+        flats: rows.length,
+        maintenanceDue: money(rows.reduce((sum, row) => sum + row.maintenanceDue, 0)),
+        lateFees: money(rows.reduce((sum, row) => sum + row.lateFees, 0)),
+        totalDue: money(rows.reduce((sum, row) => sum + row.totalDue, 0)),
+      },
+    });
+  } catch (error) { next(error); }
+});
+
 app.get('/api/dashboard', requireAdmin, async (_req, res, next) => {
   try {
     const { rows: communityRows } = await pool.query('SELECT id FROM communities ORDER BY created_at LIMIT 1');
-    if (!communityRows[0]) return res.json({ summary: {}, monthly: [], collections: [], expenses: [] });
+    if (!communityRows[0]) return res.json({ summary: {}, monthly: [], collections: [], expenses: [], payments: [] });
     const communityId = communityRows[0].id;
-    const [summaryResult, monthlyResult, collectionResult, expenseResult] = await Promise.all([
+    const [summaryResult, monthlyResult, collectionResult, expenseResult, paymentResult] = await Promise.all([
       pool.query(`
         SELECT
           COALESCE((SELECT SUM(pa.maintenance_amount + pa.late_fee_amount) FROM payment_allocations pa JOIN payments p ON p.id = pa.payment_id WHERE p.status = 'posted'), 0) AS maintenance_collected,
@@ -253,7 +345,24 @@ app.get('/api/dashboard', requireAdmin, async (_req, res, next) => {
         WHERE c.community_id = $1
         GROUP BY c.id ORDER BY c.created_at DESC
       `, [communityId]),
-      pool.query('SELECT e.id, e.category, e.source_type, e.collection_id, e.payment_mode, c.name AS source_name, e.description, e.amount, e.expense_date, e.status, e.created_at FROM expenses e LEFT JOIN community_collections c ON c.id = e.collection_id WHERE e.community_id = $1 ORDER BY e.expense_date DESC, e.created_at DESC LIMIT 20', [communityId])
+      pool.query('SELECT e.id, e.category, e.source_type, e.collection_id, e.payment_mode, c.name AS source_name, e.description, e.amount, e.expense_date, e.status, e.created_at FROM expenses e LEFT JOIN community_collections c ON c.id = e.collection_id WHERE e.community_id = $1 ORDER BY e.expense_date DESC, e.created_at DESC LIMIT 20', [communityId]),
+      pool.query(`
+        SELECT p.id, p.receipt_no, f.flat_no, o.full_name AS owner_name,
+          SUM(pa.maintenance_amount + pa.late_fee_amount) AS amount,
+          SUM(pa.maintenance_amount) AS maintenance_amount,
+          SUM(pa.late_fee_amount) AS late_fee_amount,
+          STRING_AGG(TO_CHAR(d.due_month, 'Mon YYYY'), ', ' ORDER BY d.due_month) AS months,
+          p.payment_mode, p.collected_by, p.paid_at
+        FROM payments p
+        JOIN payment_allocations pa ON pa.payment_id = p.id
+        JOIN maintenance_dues d ON d.id = pa.due_id
+        JOIN flats f ON f.id = p.flat_id
+        LEFT JOIN flat_owners fo ON fo.flat_id = f.id AND fo.is_primary = TRUE AND fo.valid_to IS NULL
+        LEFT JOIN owners o ON o.id = fo.owner_id
+        WHERE p.status = 'posted'
+        GROUP BY p.id, p.receipt_no, f.flat_no, o.full_name, p.payment_mode, p.collected_by, p.paid_at
+        ORDER BY p.paid_at DESC LIMIT 20
+      `)
     ]);
     res.json({
       summary: summaryResult.rows[0],
@@ -263,7 +372,52 @@ app.get('/api/dashboard', requireAdmin, async (_req, res, next) => {
           { id: 'maintenance', name: 'Maintenance', collected: summaryResult.rows[0].maintenance_collected, spent: summaryResult.rows[0].maintenance_expenses, cashCollected: summaryResult.rows[0].maintenance_cash_collected, bankCollected: summaryResult.rows[0].maintenance_bank_collected, cashSpent: summaryResult.rows[0].maintenance_cash_expenses, bankSpent: summaryResult.rows[0].maintenance_bank_expenses },
           ...collectionResult.rows.map((collection) => ({ id: collection.id, name: collection.name, collected: collection.collected, spent: collection.expenses, cashCollected: collection.cash_collected, bankCollected: collection.bank_collected, cashSpent: collection.cash_expenses, bankSpent: collection.bank_expenses }))
         ].map((source) => ({ ...source, balance: money(Number(source.collected || 0) - Number(source.spent || 0)), cashBalance: money(Number(source.cashCollected || 0) - Number(source.cashSpent || 0)), bankBalance: money(Number(source.bankCollected || 0) - Number(source.bankSpent || 0)) })),
-      expenses: expenseResult.rows.map(presentExpense)
+      expenses: expenseResult.rows.map(presentExpense),
+      payments: paymentResult.rows.map(row => ({ id: row.id, receiptNo: row.receipt_no, flatNo: row.flat_no, ownerName: row.owner_name, amount: money(row.amount), maintenanceAmount: money(row.maintenance_amount), lateFeeAmount: money(row.late_fee_amount), months: row.months, paymentMode: row.payment_mode, collectedBy: row.collected_by, paidAt: row.paid_at, type: 'maintenance' }))
+    });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/payments/:paymentId', requireAdmin, async (req, res, next) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT p.id, p.receipt_no, p.amount, p.payment_mode, p.reference_no,
+        p.collected_by_name, p.paid_at, p.status, p.notes,
+        f.flat_no, o.full_name AS owner_name
+      FROM payments p
+      JOIN flats f ON f.id = p.flat_id
+      LEFT JOIN flat_owners fo ON fo.flat_id = f.id AND fo.is_primary = TRUE AND fo.valid_to IS NULL
+      LEFT JOIN owners o ON o.id = fo.owner_id
+      WHERE p.id = $1
+    `, [req.params.paymentId]);
+    if (!rows[0]) return res.status(404).json({ message: 'Receipt not found' });
+    const { rows: allocations } = await pool.query(`
+      SELECT d.due_month::text AS due_month,
+        pa.maintenance_amount, pa.late_fee_amount
+      FROM payment_allocations pa
+      JOIN maintenance_dues d ON d.id = pa.due_id
+      WHERE pa.payment_id = $1
+      ORDER BY d.due_month
+    `, [req.params.paymentId]);
+    const payment = rows[0];
+    res.json({
+      id: payment.id,
+      receiptNo: payment.receipt_no,
+      amount: money(payment.amount),
+      paymentMode: payment.payment_mode,
+      referenceNo: payment.reference_no,
+      collectedBy: payment.collected_by_name,
+      paidAt: payment.paid_at,
+      status: payment.status,
+      notes: payment.notes,
+      flatNo: payment.flat_no,
+      ownerName: payment.owner_name,
+      allocations: allocations.map((allocation) => ({
+        dueMonth: allocation.due_month,
+        maintenanceAmount: money(allocation.maintenance_amount),
+        lateFeeAmount: money(allocation.late_fee_amount),
+        amount: money(Number(allocation.maintenance_amount) + Number(allocation.late_fee_amount)),
+      })),
     });
   } catch (error) { next(error); }
 });
@@ -441,6 +595,24 @@ app.post('/api/flats/:flatId/advance-dues', requireAdmin, async (req, res, next)
   } catch (error) { next(error); }
 });
 
+app.post('/api/flats/:flatId/dues/:dueId/late-fee-waiver', requireAdmin, async (req, res, next) => {
+  try {
+    const result = await withTransaction(async (client) => {
+      const rows = await loadDues(client, req.params.flatId, [req.params.dueId]);
+      if (!rows[0]) throw Object.assign(new Error('Due is invalid or already paid'), { statusCode: 409 });
+      const due = presentDue(rows[0]);
+      if (due.lateFee <= 0) throw Object.assign(new Error('There is no pending late fee to waive'), { statusCode: 409 });
+      await client.query(`
+        INSERT INTO adjustments (due_id, amount, adjustment_type, reason, created_by)
+        VALUES ($1, $2, 'waiver', $3, $4)
+      `, [due.id, -due.lateFee, `Late fee waiver: ${due.dueMonth}`, req.admin.sub]);
+      const updatedRows = await loadDues(client, req.params.flatId, [req.params.dueId]);
+      return presentDue(updatedRows[0]);
+    });
+    res.json({ due: result, message: `Late fee waived for ${result.dueMonth}.` });
+  } catch (error) { next(error); }
+});
+
 app.post('/api/collections', requireAdmin, async (req, res, next) => {
   const name = String(req.body.name || '').trim();
   const amount = Number(req.body.amount);
@@ -470,12 +642,15 @@ app.post('/api/collections', requireAdmin, async (req, res, next) => {
 });
 
 app.post('/api/payments', requireAdmin, async (req, res, next) => {
-  const { flatId, dueIds = [], collectionDueIds = [], paymentMode, collectedBy } = req.body;
+  const { flatId, dueIds = [], collectionDueIds = [], paymentMode, collectedBy, includeLateFees = false, waiveLateFees = false } = req.body;
   if (!flatId || (!Array.isArray(dueIds) && !Array.isArray(collectionDueIds)) || (!dueIds.length && !collectionDueIds.length) || !['cash', 'upi', 'bank'].includes(paymentMode)) {
     return res.status(400).json({ message: 'Select at least one due and a valid paymentMode' });
   }
   if (paymentMode === 'cash' && !String(collectedBy || '').trim()) {
     return res.status(400).json({ message: 'collectedBy is required for cash payments' });
+  }
+  if (includeLateFees && waiveLateFees) {
+    return res.status(400).json({ message: 'Choose either collect or waive late fees' });
   }
 
   try {
@@ -494,22 +669,46 @@ app.post('/api/payments', requireAdmin, async (req, res, next) => {
       const collectionRows = collectionDueIds.length ? await loadCollectionDues(client, flatId, collectionDueIds) : [];
       if (collectionRows.length !== collectionDueIds.length) throw Object.assign(new Error('One or more selected collections are invalid or already paid'), { statusCode: 409 });
       const collectionDues = collectionRows.map(presentCollectionDue);
-      const total = money(dues.reduce((sum, due) => sum + due.totalDue, 0) + collectionDues.reduce((sum, due) => sum + due.amount, 0));
-      const payment = await client.query(`
+      if (waiveLateFees) {
+        for (const due of dues) {
+          if (due.lateFee > 0) {
+            await client.query(`
+              INSERT INTO adjustments (due_id, amount, adjustment_type, reason, created_by)
+              VALUES ($1, $2, 'waiver', $3, $4)
+            `, [due.id, -due.lateFee, `Late fee waiver: ${due.dueMonth}`, req.admin.sub]);
+          }
+        }
+      }
+      const allocations = dues.map((due) => ({
+        ...due,
+        maintenanceAmount: due.maintenanceDue,
+        lateFeeAmount: includeLateFees ? due.lateFee : 0,
+      }));
+      const total = money(allocations.reduce((sum, due) => sum + due.maintenanceAmount + due.lateFeeAmount, 0) + collectionDues.reduce((sum, due) => sum + due.amount, 0));
+      if (total <= 0 && !waiveLateFees) throw Object.assign(new Error('The selected dues have no outstanding amount'), { statusCode: 409 });
+      const payment = total > 0 ? await client.query(`
         INSERT INTO payments (flat_id, amount, payment_mode, collected_by_name)
         VALUES ($1, $2, $3, $4) RETURNING id, paid_at
-      `, [flatId, total, paymentMode, paymentMode === 'cash' ? String(collectedBy).trim() : null]);
-      for (const due of dues) {
-        await client.query(`INSERT INTO payment_allocations (payment_id, due_id, maintenance_amount, late_fee_amount) VALUES ($1, $2, $3, $4)`, [payment.rows[0].id, due.id, due.maintenanceDue, due.lateFee]);
-        await client.query(`UPDATE maintenance_dues SET status = 'paid' WHERE id = $1`, [due.id]);
+      `, [flatId, total, paymentMode, paymentMode === 'cash' ? String(collectedBy).trim() : null]) : { rows: [] };
+      for (const due of allocations) {
+        if (payment.rows[0] && (due.maintenanceAmount > 0 || due.lateFeeAmount > 0)) {
+          await client.query(`INSERT INTO payment_allocations (payment_id, due_id, maintenance_amount, late_fee_amount) VALUES ($1, $2, $3, $4)`, [payment.rows[0].id, due.id, due.maintenanceAmount, due.lateFeeAmount]);
+        }
       }
       for (const due of collectionDues) {
         await client.query(`INSERT INTO collection_payment_allocations (payment_id, collection_due_id, amount) VALUES ($1, $2, $3)`, [payment.rows[0].id, due.id, due.amount]);
         await client.query(`UPDATE collection_dues SET status = 'paid', paid_at = NOW() WHERE id = $1`, [due.id]);
       }
-      return { payment: payment.rows[0], flat: flatRows[0], dues, collectionDues, total };
+      for (const due of allocations) {
+        const refreshedRows = await loadDues(client, flatId, [due.id]);
+        const refreshedDue = refreshedRows[0] && presentDue(refreshedRows[0]);
+        if (refreshedDue) {
+          await client.query(`UPDATE maintenance_dues SET status = $2, updated_at = NOW() WHERE id = $1`, [due.id, refreshedDue.maintenanceDue <= 0 && refreshedDue.lateFee <= 0 ? 'paid' : 'partially_paid']);
+        }
+      }
+      return { payment: payment.rows[0] || null, flat: flatRows[0], dues: allocations, collectionDues, total };
     });
-    res.status(201).json({ success: true, ...result, message: `Payment of ₹${result.total.toLocaleString('en-IN')} recorded.` });
+    res.status(201).json({ success: true, ...result, message: result.total > 0 ? `Payment of ₹${result.total.toLocaleString('en-IN')} recorded.` : 'Late fee waived.' });
   } catch (error) { next(error); }
 });
 
@@ -560,7 +759,30 @@ async function start() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+      CREATE TABLE IF NOT EXISTS expense_categories (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        community_id UUID NOT NULL REFERENCES communities(id),
+        name VARCHAR(120) NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_by UUID REFERENCES admin_users(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (community_id, name)
+      );
       CREATE INDEX IF NOT EXISTS idx_expenses_community_date ON expenses(community_id, expense_date DESC);
+    `);
+    await pool.query(`
+      INSERT INTO expense_categories (community_id, name)
+      SELECT c.id, defaults.name
+      FROM communities c
+      CROSS JOIN (VALUES
+        ('Babulal security guard salary'),
+        ('Night guard security salary'),
+        ('Cleaning staff salary'),
+        ('Common electricity bills'),
+        ('Other maintenance expense')
+      ) AS defaults(name)
+      WHERE c.active = TRUE
+      ON CONFLICT (community_id, name) DO NOTHING
     `);
     await pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS source_type VARCHAR(20) NOT NULL DEFAULT 'maintenance'`);
     await pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS collection_id UUID REFERENCES community_collections(id)`);
