@@ -1,6 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import multer from 'multer';
 import 'dotenv/config';
 import { pool, withTransaction } from './db.js';
 import { calculateLateFee, feePolicy } from './fee.js';
@@ -9,6 +12,16 @@ const app = express();
 const port = Number(process.env.PORT || 4000);
 const authSecret = process.env.AUTH_SECRET || 'coral-golf-green-development-secret';
 const adminTokenTtlSeconds = 8 * 60 * 60;
+const attachmentDirectory = path.resolve(process.env.PAYMENT_ATTACHMENT_DIR || 'uploads/payment-attachments');
+fs.mkdirSync(attachmentDirectory, { recursive: true });
+const paymentAttachmentUpload = multer({
+  storage: multer.diskStorage({
+    destination: attachmentDirectory,
+    filename: (_req, file, callback) => callback(null, `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase()}`),
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, callback) => callback(null, ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(file.mimetype)),
+});
 
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(',') || true }));
 app.use(express.json());
@@ -383,6 +396,7 @@ app.get('/api/payments/:paymentId', requireAdmin, async (req, res, next) => {
     const { rows } = await pool.query(`
       SELECT p.id, p.receipt_no, p.amount, p.payment_mode, p.reference_no,
         p.collected_by_name, p.paid_at, p.status, p.notes,
+        p.attachment_name, p.attachment_original_name, p.attachment_mime_type, p.attachment_size,
         f.flat_no, o.full_name AS owner_name
       FROM payments p
       JOIN flats f ON f.id = p.flat_id
@@ -410,6 +424,12 @@ app.get('/api/payments/:paymentId', requireAdmin, async (req, res, next) => {
       paidAt: payment.paid_at,
       status: payment.status,
       notes: payment.notes,
+      attachment: payment.attachment_name ? {
+        name: payment.attachment_original_name,
+        mimeType: payment.attachment_mime_type,
+        size: payment.attachment_size,
+        url: `/api/payment-attachments/${encodeURIComponent(payment.attachment_name)}`,
+      } : null,
       flatNo: payment.flat_no,
       ownerName: payment.owner_name,
       allocations: allocations.map((allocation) => ({
@@ -420,6 +440,13 @@ app.get('/api/payments/:paymentId', requireAdmin, async (req, res, next) => {
       })),
     });
   } catch (error) { next(error); }
+});
+
+app.get('/api/payment-attachments/:filename', requireAdmin, (req, res) => {
+  const filename = path.basename(req.params.filename);
+  const filePath = path.join(attachmentDirectory, filename);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ message: 'Attachment not found' });
+  return res.sendFile(filePath);
 });
 
 app.post('/api/admin-login', async (req, res, next) => {
@@ -641,8 +668,13 @@ app.post('/api/collections', requireAdmin, async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post('/api/payments', requireAdmin, async (req, res, next) => {
-  const { flatId, dueIds = [], collectionDueIds = [], paymentMode, collectedBy, includeLateFees = false, waiveLateFees = false } = req.body;
+app.post('/api/payments', requireAdmin, paymentAttachmentUpload.single('attachment'), async (req, res, next) => {
+  const parseArray = (value) => Array.isArray(value) ? value : JSON.parse(value || '[]');
+  const dueIds = parseArray(req.body.dueIds);
+  const collectionDueIds = parseArray(req.body.collectionDueIds);
+  const { flatId, paymentMode, collectedBy } = req.body;
+  const includeLateFees = req.body.includeLateFees === true || req.body.includeLateFees === 'true';
+  const waiveLateFees = req.body.waiveLateFees === true || req.body.waiveLateFees === 'true';
   if (!flatId || (!Array.isArray(dueIds) && !Array.isArray(collectionDueIds)) || (!dueIds.length && !collectionDueIds.length) || !['cash', 'upi', 'bank'].includes(paymentMode)) {
     return res.status(400).json({ message: 'Select at least one due and a valid paymentMode' });
   }
@@ -687,9 +719,9 @@ app.post('/api/payments', requireAdmin, async (req, res, next) => {
       const total = money(allocations.reduce((sum, due) => sum + due.maintenanceAmount + due.lateFeeAmount, 0) + collectionDues.reduce((sum, due) => sum + due.amount, 0));
       if (total <= 0 && !waiveLateFees) throw Object.assign(new Error('The selected dues have no outstanding amount'), { statusCode: 409 });
       const payment = total > 0 ? await client.query(`
-        INSERT INTO payments (flat_id, amount, payment_mode, collected_by_name)
-        VALUES ($1, $2, $3, $4) RETURNING id, paid_at
-      `, [flatId, total, paymentMode, paymentMode === 'cash' ? String(collectedBy).trim() : null]) : { rows: [] };
+        INSERT INTO payments (flat_id, amount, payment_mode, collected_by_name, attachment_name, attachment_original_name, attachment_mime_type, attachment_size)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, paid_at
+      `, [flatId, total, paymentMode, paymentMode === 'cash' ? String(collectedBy).trim() : null, req.file?.filename || null, req.file?.originalname || null, req.file?.mimetype || null, req.file?.size || null]) : { rows: [] };
       for (const due of allocations) {
         if (payment.rows[0] && (due.maintenanceAmount > 0 || due.lateFeeAmount > 0)) {
           await client.query(`INSERT INTO payment_allocations (payment_id, due_id, maintenance_amount, late_fee_amount) VALUES ($1, $2, $3, $4)`, [payment.rows[0].id, due.id, due.maintenanceAmount, due.lateFeeAmount]);
@@ -709,7 +741,10 @@ app.post('/api/payments', requireAdmin, async (req, res, next) => {
       return { payment: payment.rows[0] || null, flat: flatRows[0], dues: allocations, collectionDues, total };
     });
     res.status(201).json({ success: true, ...result, message: result.total > 0 ? `Payment of ₹${result.total.toLocaleString('en-IN')} recorded.` : 'Late fee waived.' });
-  } catch (error) { next(error); }
+  } catch (error) {
+    if (req.file?.path) fs.rm(req.file.path, { force: true }, () => {});
+    next(error);
+  }
 });
 
 app.use((error, _req, res, _next) => {
@@ -788,6 +823,10 @@ async function start() {
     await pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS collection_id UUID REFERENCES community_collections(id)`);
     await pool.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS payment_mode VARCHAR(20) NOT NULL DEFAULT 'cash'`);
     await pool.query(`ALTER TABLE flats ADD COLUMN IF NOT EXISTS resident_pin VARCHAR(4)`);
+    await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS attachment_name VARCHAR(255)`);
+    await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS attachment_original_name VARCHAR(255)`);
+    await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS attachment_mime_type VARCHAR(100)`);
+    await pool.query(`ALTER TABLE payments ADD COLUMN IF NOT EXISTS attachment_size INTEGER`);
     await pool.query(`UPDATE flats SET resident_pin = LPAD((1000 + flat_no::integer)::text, 4, '0') WHERE resident_pin IS NULL AND flat_no ~ '^[0-9]+$'`);
     await pool.query(`
       DO $$ BEGIN

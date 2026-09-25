@@ -145,6 +145,10 @@ CREATE TABLE payments (
   paid_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   status VARCHAR(20) NOT NULL DEFAULT 'posted' CHECK (status IN ('posted', 'reversed')),
   notes TEXT,
+  attachment_name VARCHAR(255),
+  attachment_original_name VARCHAR(255),
+  attachment_mime_type VARCHAR(100),
+  attachment_size INTEGER,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CHECK (payment_mode <> 'cash' OR NULLIF(TRIM(collected_by_name), '') IS NOT NULL)
 );

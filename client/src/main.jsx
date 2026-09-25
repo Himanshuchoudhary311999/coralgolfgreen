@@ -8,17 +8,22 @@ import {
   CircleAlert,
   CreditCard,
   Download,
+  FileImage,
+  FileText,
   IndianRupee,
   LoaderCircle,
   LogOut,
   Receipt,
   Search,
+  Upload,
   Users,
+  X,
 } from "lucide-react";
 import "./styles.css";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:4000/api";
 const ADMIN_TOKEN_KEY = "cgg_admin_token";
+const API_ORIGIN = API.replace(/\/api\/?$/, "") || window.location.origin;
 const money = (value) => `₹${Number(value || 0).toLocaleString("en-IN")}`;
 const displayDate = (value, options) =>
   new Date(value).toLocaleDateString("en-IN", options);
@@ -514,7 +519,11 @@ function App() {
   const [selectedFlatId, setSelectedFlatId] = useState("");
   const [selectedDueIds, setSelectedDueIds] = useState([]);
   const [selectedCollectionDueIds, setSelectedCollectionDueIds] = useState([]);
+  const [showPaidMonths, setShowPaidMonths] = useState(false);
+  const [showAdvancedMonths, setShowAdvancedMonths] = useState(false);
   const [paymentMode, setPaymentMode] = useState("");
+  const [paymentAttachment, setPaymentAttachment] = useState(null);
+  const [paymentAttachmentPreview, setPaymentAttachmentPreview] = useState("");
   const [includeLateFees, setIncludeLateFees] = useState(false);
   const [waiveLateFees, setWaiveLateFees] = useState(false);
   const [collectedBy, setCollectedBy] = useState("");
@@ -546,7 +555,12 @@ function App() {
     new Date().toISOString().slice(0, 10),
   );
   const [savingExpense, setSavingExpense] = useState(false);
+  const [expenseHistoryMonth, setExpenseHistoryMonth] = useState("");
+  const [expenseHistoryMode, setExpenseHistoryMode] = useState("all");
+  const [expenseHistorySource, setExpenseHistorySource] = useState("all");
   const [activeAdminTab, setActiveAdminTab] = useState("overview");
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefreshed, setLastRefreshed] = useState(null);
   const [historyMonth, setHistoryMonth] = useState("");
   const [historyPage, setHistoryPage] = useState(1);
   const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
@@ -555,6 +569,37 @@ function App() {
   const [reportError, setReportError] = useState("");
   const [selectedReceipt, setSelectedReceipt] = useState(null);
   const [receiptLoading, setReceiptLoading] = useState(false);
+  const [selectedExpense, setSelectedExpense] = useState(null);
+
+  useEffect(() => {
+    if (!paymentAttachment || !paymentAttachment.type.startsWith("image/")) {
+      setPaymentAttachmentPreview("");
+      return undefined;
+    }
+    const previewUrl = URL.createObjectURL(paymentAttachment);
+    setPaymentAttachmentPreview(previewUrl);
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [paymentAttachment]);
+
+  function selectPaymentAttachment(file) {
+    if (!file) return;
+    const allowedTypes = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
+    if (!allowedTypes.includes(file.type)) {
+      setMessage({ type: "error", text: "Choose a JPG, PNG, WEBP image, or PDF file." });
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setMessage({ type: "error", text: "Payment proof must be 5 MB or smaller." });
+      return;
+    }
+    setPaymentAttachment(file);
+    setMessage(null);
+  }
+
+  function clearPaymentAttachment() {
+    setPaymentAttachment(null);
+    setPaymentAttachmentPreview("");
+  }
 
   function openAdminTab(tab, target) {
     setActiveAdminTab(tab);
@@ -588,6 +633,36 @@ function App() {
     } finally {
       setReceiptLoading(false);
     }
+  }
+
+  async function openPaymentAttachment(attachmentUrl) {
+    const popup = window.open("about:blank", "_blank");
+    if (!popup) {
+      setMessage({ type: "error", text: "Allow pop-ups to view the payment attachment." });
+      return;
+    }
+    try {
+      const response = await fetch(new URL(attachmentUrl, `${API_ORIGIN}/`), {
+        headers: adminHeaders(),
+      });
+      if (!response.ok) throw new Error("Payment attachment could not be loaded");
+      const blobUrl = URL.createObjectURL(await response.blob());
+      popup.location.href = blobUrl;
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+    } catch (error) {
+      popup.close();
+      setMessage({ type: "error", text: error.message });
+    }
+  }
+
+  function printReceipt() {
+    if (!selectedReceipt) return;
+    const popup = window.open("", "_blank", "width=720,height=800");
+    if (!popup) return;
+    const receipt = selectedReceipt;
+    const rows = receipt.allocations.map((allocation) => `<tr><td>${displayMonth(allocation.dueMonth)}</td><td>${money(allocation.maintenanceAmount)}</td><td>${money(allocation.lateFeeAmount)}</td><td>${money(allocation.amount)}</td></tr>`).join("");
+    popup.document.write(`<!doctype html><html><head><title>Receipt #${receipt.receiptNo}</title><style>body{margin:0;padding:36px;color:#19332f;font-family:Arial,sans-serif}main{max-width:620px;margin:auto;padding:28px;border:1px solid #dce5df;border-top:7px solid #2d806e}h1{margin:0;font-size:24px}h2{margin:5px 0 22px;color:#7a8596;font-size:13px;font-weight:normal}.brand{color:#d16d3b;font-size:11px;font-weight:bold;letter-spacing:2px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:14px;background:#f5f9f6}.grid span,.grid strong{display:block}.grid span{color:#7a8596;font-size:10px}.grid strong{margin-top:3px;font-size:12px}h3{margin:24px 0 8px;font-size:12px;text-transform:uppercase}table{width:100%;border-collapse:collapse;font-size:11px}th,td{padding:10px 7px;border-bottom:1px solid #e5eee8;text-align:right}th:first-child,td:first-child{text-align:left}th{color:#7a8596;background:#f5f9f6;font-size:9px;text-transform:uppercase}.total{display:flex;justify-content:space-between;padding-top:16px;margin-top:10px;border-top:2px solid #dce5df;font-weight:bold}.total strong{color:#2d806e;font-size:20px}@media print{body{padding:0}main{border-left:0;border-right:0}}</style></head><body><main><div class="brand">CORAL GOLF GREEN</div><h1>Payment receipt #${receipt.receiptNo}</h1><h2>Maintenance payment</h2><div class="grid"><div><span>Flat</span><strong>${receipt.flatNo}</strong></div><div><span>Owner</span><strong>${receipt.ownerName || "Not assigned"}</strong></div><div><span>Paid on</span><strong>${displayDate(receipt.paidAt, { day: "numeric", month: "short", year: "numeric" })}</strong></div><div><span>Payment mode</span><strong>${receipt.paymentMode.toUpperCase()}</strong></div></div><h3>Paid for</h3><table><thead><tr><th>Month</th><th>Maintenance</th><th>Late fee</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table><div class="total"><span>Total paid</span><strong>${money(receipt.amount)}</strong></div></main><script>window.onload=()=>{window.focus();window.print();};</script></body></html>`);
+    popup.document.close();
   }
 
   function downloadOutstandingPdf() {
@@ -655,6 +730,36 @@ function App() {
     });
     if (!response.ok) throw new Error("Dashboard could not be loaded.");
     setDashboard(await response.json());
+    setLastRefreshed(new Date());
+  }
+
+  async function refreshAdminData() {
+    setRefreshing(true);
+    try {
+      const [flatResponse, configResponse, dashboardResponse, categoryResponse] = await Promise.all([
+        fetch(`${API}/flats`, { headers: adminHeaders() }),
+        fetch(`${API}/config`, { headers: adminHeaders() }),
+        fetch(`${API}/dashboard`, { headers: adminHeaders() }),
+        fetch(`${API}/expense-categories`, { headers: adminHeaders() }),
+      ]);
+      if ([flatResponse, configResponse, dashboardResponse, categoryResponse].some((response) => response.status === 401)) {
+        throw new Error("Your admin session has expired.");
+      }
+      const [flatData, config, dashboardData, categoryData] = await Promise.all([
+        flatResponse.json(), configResponse.json(), dashboardResponse.json(), categoryResponse.json(),
+      ]);
+      setFlats(flatData.flats || []);
+      setFeePolicy(config.feePolicy);
+      setDashboard(dashboardData);
+      setExpenseCategories(categoryData.categories || []);
+      setLastRefreshed(new Date());
+      setMessage({ type: "success", text: "Admin data refreshed." });
+    } catch (error) {
+      if (error.message.includes("session")) adminLogout();
+      else setMessage({ type: "error", text: error.message || "Could not refresh admin data." });
+    } finally {
+      setRefreshing(false);
+    }
   }
 
   useEffect(() => {
@@ -688,6 +793,7 @@ function App() {
         setFeePolicy(config.feePolicy);
         setDashboard(dashboardData);
         setExpenseCategories(categoryData.categories || []);
+        setLastRefreshed(new Date());
       })
       .catch((error) => {
         if (error.message.includes("session")) adminLogout();
@@ -809,8 +915,12 @@ function App() {
     setSelectedFlatId(id);
     setSelectedDueIds([]);
     setSelectedCollectionDueIds([]);
+    setShowPaidMonths(false);
+    setShowAdvancedMonths(false);
     setIncludeLateFees(false);
     setWaiveLateFees(false);
+    setPaymentMode("");
+    setCollectedBy("");
     setMessage(null);
   }
 
@@ -946,23 +1056,25 @@ function App() {
     setSaving(true);
     setMessage(null);
     try {
+      const formData = new FormData();
+      formData.append("flatId", selectedFlatId);
+      formData.append("dueIds", JSON.stringify(selectedDueIds));
+      formData.append("collectionDueIds", JSON.stringify(selectedCollectionDueIds));
+      formData.append("paymentMode", paymentMode);
+      formData.append("collectedBy", collectedBy);
+      formData.append("includeLateFees", String(includeLateFees));
+      formData.append("waiveLateFees", String(waiveLateFees));
+      if (paymentAttachment) formData.append("attachment", paymentAttachment);
       const response = await fetch(`${API}/payments`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...adminHeaders() },
-        body: JSON.stringify({
-          flatId: selectedFlatId,
-          dueIds: selectedDueIds,
-          collectionDueIds: selectedCollectionDueIds,
-          paymentMode,
-          collectedBy,
-          includeLateFees,
-          waiveLateFees,
-        }),
+        headers: adminHeaders(),
+        body: formData,
       });
       const data = await response.json();
       if (!response.ok)
         throw new Error(data.message || "Payment could not be recorded");
       setMessage({ type: "success", text: data.message });
+      if (data.payment?.id) openReceipt(data.payment.id);
       setFlats((current) =>
         current.map((item) =>
           item.id === selectedFlatId
@@ -995,6 +1107,7 @@ function App() {
       setIncludeLateFees(false);
       setWaiveLateFees(false);
       setCollectedBy("");
+      clearPaymentAttachment();
     } catch (error) {
       setMessage({ type: "error", text: error.message });
     } finally {
@@ -1036,6 +1149,13 @@ function App() {
     (historyPage - 1) * historyPageSize,
     historyPage * historyPageSize,
   );
+  const filteredExpenses = (dashboard?.expenses || []).filter((expense) => {
+    const matchesMonth = !expenseHistoryMonth || String(expense.expenseDate || "").slice(0, 7) === expenseHistoryMonth;
+    const matchesMode = expenseHistoryMode === "all" || expense.paymentMode === expenseHistoryMode;
+    const matchesSource = expenseHistorySource === "all" || expense.sourceType === expenseHistorySource;
+    return matchesMonth && matchesMode && matchesSource;
+  });
+  const filteredExpenseTotal = filteredExpenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
 
   if (!adminLoggedIn)
     return (
@@ -1109,6 +1229,39 @@ function App() {
       </main>
     );
 
+  const adminTabCopy = {
+    overview: {
+      eyebrow: "COLLECTIONS / 2026",
+      title: <>Keep every home<br /><em>in good standing.</em></>,
+      copy: "See the community position at a glance, then move straight into the work that needs attention.",
+    },
+    payment: {
+      eyebrow: "RECEIPTS / MAINTENANCE",
+      title: <>Record payments<br /><em>with confidence.</em></>,
+      copy: "Find a residence, select the months covered, and leave a clear receipt trail for every payment.",
+    },
+    collection: {
+      eyebrow: "COMMUNITY COLLECTIONS",
+      title: <>Fund the moments<br /><em>that bring us together.</em></>,
+      copy: "Create a shared collection, apply it to every flat, and track what has been received.",
+    },
+    expense: {
+      eyebrow: "OUTGOINGS / LEDGER",
+      title: <>Know where the money<br /><em>goes next.</em></>,
+      copy: "Log expenses against the right source and keep cash and bank balances honest.",
+    },
+    history: {
+      eyebrow: "AUDIT TRAIL / TRANSACTIONS",
+      title: <>Every movement<br /><em>has a record.</em></>,
+      copy: "Review recent receipts and expenses by month, with payment details ready when you need them.",
+    },
+    report: {
+      eyebrow: "REPORTS / OUTSTANDING DUES",
+      title: <>Turn pending dues<br /><em>into a clear picture.</em></>,
+      copy: "Generate a month-wise outstanding report with maintenance, late fees, and flat-level detail.",
+    },
+  }[activeAdminTab];
+
   return (
     <main className={`app-shell admin-view-${activeAdminTab}`}>
       <header className="topbar">
@@ -1120,6 +1273,11 @@ function App() {
         <div className="header-status">
           <span className="status-dot" />
           Live records
+          <button className="admin-refresh" type="button" onClick={refreshAdminData} disabled={refreshing} title="Refresh admin data">
+            <LoaderCircle className={refreshing ? "spin" : ""} size={14} />
+            <span>{refreshing ? "Refreshing" : "Refresh"}</span>
+          </button>
+          {lastRefreshed && <small className="last-refreshed">Updated {lastRefreshed.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}</small>}
           <button className="admin-logout" onClick={adminLogout}>
             Log out
           </button>
@@ -1127,17 +1285,10 @@ function App() {
       </header>
       <section className="intro">
         <div>
-          <p className="eyebrow">COLLECTIONS / 2026</p>
-          <h2>
-            Keep every home
-            <br />
-            <em>in good standing.</em>
-          </h2>
+          <p className="eyebrow">{adminTabCopy.eyebrow}</p>
+          <h2>{adminTabCopy.title}</h2>
         </div>
-        <p className="intro-copy">
-          Record maintenance payments against the right month. Outstanding dues
-          after 10 August carry a daily late fee.
-        </p>
+        <p className="intro-copy">{adminTabCopy.copy}</p>
       </section>
       <nav className="admin-menu" aria-label="Admin sections">
         {[
@@ -1151,6 +1302,7 @@ function App() {
           <button
             className={`menu-item ${activeAdminTab === tab ? "active" : ""}`}
             onClick={() => openAdminTab(tab, target)}
+            aria-current={activeAdminTab === tab ? "page" : undefined}
             key={tab}
             title={label}
           >
@@ -1399,7 +1551,13 @@ function App() {
       </section>
       <section className="expense-page" id="expenses">
         <form className="expense-form" onSubmit={createExpense}>
-          <div className="dashboard-section-title">Record expense</div>
+          <div className="expense-form-heading">
+            <div>
+              <p className="eyebrow">OUTGOINGS</p>
+              <h3>Record expense</h3>
+              <span>Log a cash or bank expense against the correct source.</span>
+            </div>
+          </div>
           <label className="field-label">Source / category
             <select value={expenseSourceType === "maintenance" ? "maintenance" : expenseCollectionId} onChange={(event) => { const value = event.target.value; setExpenseSourceType(value === "maintenance" ? "maintenance" : "collection"); setExpenseCollectionId(value === "maintenance" ? "" : value); setExpenseCategory(value === "maintenance" ? "" : dashboard.collections.find((collection) => collection.id === value)?.name || ""); setExpenseSubcategory(""); }}>
               <option value="maintenance">Maintenance</option>
@@ -1452,6 +1610,31 @@ function App() {
           <label className="field-label">Description<input value={expenseDescription} onChange={(event) => setExpenseDescription(event.target.value)} placeholder="Optional details" /></label>
           <button className="advance-button" disabled={savingExpense}>{savingExpense ? "Saving..." : "Record expense"}</button>
         </form>
+        <section className="expense-history-panel">
+          <div className="expense-history-heading">
+            <div>
+              <p className="eyebrow">LEDGER</p>
+              <h3>Expense history</h3>
+            </div>
+            <strong>{money(filteredExpenseTotal)}</strong>
+          </div>
+          <div className="expense-history-filters">
+            <label>Month<input type="month" value={expenseHistoryMonth} onChange={(event) => setExpenseHistoryMonth(event.target.value)} /></label>
+            <label>Paid from<select value={expenseHistoryMode} onChange={(event) => setExpenseHistoryMode(event.target.value)}><option value="all">All methods</option><option value="cash">Cash</option><option value="bank">Bank</option></select></label>
+            <label>Source<select value={expenseHistorySource} onChange={(event) => setExpenseHistorySource(event.target.value)}><option value="all">All sources</option><option value="maintenance">Maintenance</option><option value="collection">Collection</option></select></label>
+            {(expenseHistoryMonth || expenseHistoryMode !== "all" || expenseHistorySource !== "all") && <button type="button" className="clear-filter" onClick={() => { setExpenseHistoryMonth(""); setExpenseHistoryMode("all"); setExpenseHistorySource("all"); }}>Clear</button>}
+          </div>
+          {filteredExpenses.length ? (
+            <div className="expense-history-list">
+              {filteredExpenses.map((expense) => (
+                    <button className="expense-history-row" type="button" key={expense.id} onClick={() => setSelectedExpense(expense)}>
+                  <div><strong>{expense.category}</strong><span>{expense.description || "No description"}</span><small>{displayDate(expense.expenseDate, { day: "numeric", month: "short", year: "numeric" })} · {expense.paymentMode === "bank" ? "Bank" : "Cash"} · {expense.sourceName || (expense.sourceType === "collection" ? "Collection" : "Maintenance")}</small></div>
+                  <b>{money(expense.amount)}</b>
+                    </button>
+              ))}
+            </div>
+          ) : <div className="expense-history-empty">No expenses match these filters.</div>}
+        </section>
       </section>
       <form className="panel collection-create" id="new-collection" onSubmit={createCollection}>
         <div className="panel-heading">
@@ -1596,7 +1779,7 @@ function App() {
                           })}
                           <small>{money(due.maintenanceDue)} maintenance · {money(due.lateFee)} late fee pending</small>
                         </span>
-                        <span className="due-amount">{money(due.totalDue)}</span>
+                        <span className="due-amount"><b>{money(due.totalDue)}</b><em className={`due-status ${due.status}`}>{due.status === "partially_paid" ? "Part paid" : "Pending"}</em></span>
                       </button>
                     </React.Fragment>
                   ))
@@ -1611,37 +1794,30 @@ function App() {
                 <>
                   <div className="section-label paid-heading">
                     <span>Paid months</span>
-                    <span>
-                      {flat.paidDues.length} month
-                      {flat.paidDues.length === 1 ? "" : "s"}
-                    </span>
+                    <button type="button" onClick={() => setShowPaidMonths((visible) => !visible)}>
+                      View history
+                    </button>
                   </div>
-                  <div className="due-list advanced-list">
+                  {showPaidMonths && <div className="due-list advanced-list paid-month-history">
                     {flat.paidDues.map((due) => (
                       <div className="due-row advanced-row-item" key={due.id}>
                         <Check size={18} />
-                        <span className="due-month">
-                          {displayDate(due.dueMonth, {
-                            month: "long",
-                            year: "numeric",
-                          })}
-                        </span>
+                        <span className="due-month">{displayDate(due.dueMonth, { month: "long", year: "numeric" })}</span>
                         <strong className="advanced-label">Paid</strong>
                       </div>
                     ))}
-                  </div>
+                  </div>}
                 </>
               )}
               {flat.advancedDues?.length > 0 && (
                 <>
                   <div className="section-label advanced-heading">
                     <span>Advanced paid</span>
-                    <span>
-                      {flat.advancedDues.length} month
-                      {flat.advancedDues.length === 1 ? "" : "s"}
-                    </span>
+                    <button type="button" onClick={() => setShowAdvancedMonths((visible) => !visible)}>
+                      {flat.advancedDues.length} advance month{flat.advancedDues.length === 1 ? "" : "s"} · {showAdvancedMonths ? "Hide history" : "View history"}
+                    </button>
                   </div>
-                  <div className="due-list advanced-list">
+                  {showAdvancedMonths && <div className="due-list advanced-list paid-month-history">
                     {flat.advancedDues.map((due) => (
                       <div className="due-row advanced-row-item" key={due.id}>
                         <Check size={18} />
@@ -1656,7 +1832,7 @@ function App() {
                         </strong>
                       </div>
                     ))}
-                  </div>
+                  </div>}
                 </>
               )}
               <div className="advance-row">
@@ -1693,65 +1869,87 @@ function App() {
           <div className="receipt">
             <div className="receipt-title">
               <Receipt size={18} />
-              Payment summary
+              Review payment
             </div>
-            <div className="receipt-line">
-              <span>Maintenance</span>
-              <strong>{money(totals.maintenance)}</strong>
-            </div>
-            <div className="receipt-line">
-              <span>Late fees</span>
-              <strong className={pendingLateFees ? "late" : ""}>
-                {money(pendingLateFees)}
-              </strong>
-            </div>
-            <label
-              className={`late-fee-toggle ${includeLateFees ? "selected" : ""} ${pendingLateFees <= 0 ? "disabled" : ""}`}
-              title={pendingLateFees > 0 ? "Add pending late fees to this payment" : "No late fees are currently pending"}
-            >
-              <input
-                id="include-late-fees"
-                type="checkbox"
-                checked={includeLateFees}
-                disabled={pendingLateFees <= 0 || waiveLateFees}
-                onChange={(event) => setIncludeLateFees(event.target.checked)}
-              />
-              <span className="late-fee-toggle-copy">
-                <strong>Collect pending late fees</strong>
-                <small>
-                  {pendingLateFees > 0
-                    ? includeLateFees
-                      ? `${money(pendingLateFees)} added to this payment`
-                      : `${money(pendingLateFees)} pending, not included`
-                    : "No late fees pending"}
-                </small>
-              </span>
-            </label>
-            <label
-              className={`late-fee-toggle waiver-toggle ${waiveLateFees ? "selected" : ""} ${pendingLateFees <= 0 ? "disabled" : ""}`}
-              title={pendingLateFees > 0 ? "Remove the pending late fees when confirming this payment" : "No late fees are currently pending"}
-            >
-              <input
-                id="waive-late-fees"
-                type="checkbox"
-                checked={waiveLateFees}
-                disabled={pendingLateFees <= 0 || includeLateFees}
-                onChange={(event) => {
-                  setWaiveLateFees(event.target.checked);
-                  if (event.target.checked) setIncludeLateFees(false);
-                }}
-              />
-              <span className="late-fee-toggle-copy">
-                <strong>Waive pending late fees</strong>
-                <small>
-                  {pendingLateFees > 0
-                    ? waiveLateFees
-                      ? `${money(pendingLateFees)} will be waived on confirm`
-                      : "Waiver will be recorded with this confirmation"
-                    : "No late fees pending"}
-                </small>
-              </span>
-            </label>
+            {flat && (
+              <div className="payment-selection-summary">
+                <div><strong>Flat {flat.flat_no}</strong><small>{flat.owner_name || "Owner not assigned"}</small></div>
+                <span>{selectedDues.length + selectedCollectionDues.length} item{selectedDues.length + selectedCollectionDues.length === 1 ? "" : "s"} selected</span>
+              </div>
+            )}
+            {(selectedDues.length > 0 || selectedCollectionDues.length > 0) && (
+              <div className="payment-selection-list">
+                {selectedDues.map((due) => (
+                  <div key={due.id}>
+                    <span>{displayMonth(due.dueMonth)}<small>{due.lateFee > 0 && !includeLateFees && !waiveLateFees ? `${money(due.lateFee)} late fee remains pending` : due.lateFee > 0 && waiveLateFees ? `${money(due.lateFee)} late fee will be waived` : ""}</small></span>
+                    <strong>{money(due.maintenanceDue + (includeLateFees ? due.lateFee : 0))}</strong>
+                  </div>
+                ))}
+                {selectedCollectionDues.map((due) => (
+                  <div key={due.id}><span>{due.name}</span><strong>{money(due.amount)}</strong></div>
+                ))}
+              </div>
+            )}
+            <fieldset className="payment-mode-fieldset">
+              <legend>1. Payment mode</legend>
+              <div className="mode-grid">
+                {[
+                  ["cash", "Cash"],
+                  ["upi", "UPI"],
+                  ["bank", "Bank transfer"],
+                ].map(([value, label]) => (
+                  <button
+                    type="button"
+                    className={`mode ${paymentMode === value ? "active" : ""}`}
+                    key={value}
+                    disabled={!flat}
+                    onClick={() => setPaymentMode(value)}
+                  >
+                    <CreditCard size={17} />
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+            {pendingLateFees > 0 && <div className="late-fee-choice-heading">Late-fee action</div>}
+            {pendingLateFees > 0 && <div className="late-fee-choice-grid">
+              <label
+                className={`late-fee-toggle ${includeLateFees ? "selected" : ""}`}
+                title="Add pending late fees to this payment"
+              >
+                <input
+                  id="include-late-fees"
+                  type="checkbox"
+                  checked={includeLateFees}
+                  onChange={(event) => {
+                    setIncludeLateFees(event.target.checked);
+                    if (event.target.checked) setWaiveLateFees(false);
+                  }}
+                />
+                <span className="late-fee-toggle-copy">
+                  <strong>Collect late fee</strong>
+                  <small>{includeLateFees ? `${money(pendingLateFees)} included` : "Add to total"}</small>
+                </span>
+              </label>
+              <label
+                className={`late-fee-toggle waiver-toggle ${waiveLateFees ? "selected" : ""}`}
+                title="Waive pending late fees"
+              >
+                <input
+                  id="waive-late-fees"
+                  type="checkbox"
+                  checked={waiveLateFees}
+                  onChange={(event) => {
+                    setWaiveLateFees(event.target.checked);
+                    if (event.target.checked) setIncludeLateFees(false);
+                  }}
+                />
+                <span className="late-fee-toggle-copy">
+                  <strong>Waive late fee</strong>
+                  <small>{waiveLateFees ? `${money(pendingLateFees)} waived` : "Remove from due"}</small>
+                </span>
+              </label>
+            </div>}
             <div className="receipt-total">
               <span>Total to collect</span>
               <strong>{money(totals.total)}</strong>
@@ -1765,26 +1963,6 @@ function App() {
                 : "Late fee policy loaded from server"}
             </span>
           </div>
-          <fieldset>
-            <legend>Payment mode</legend>
-            <div className="mode-grid">
-              {[
-                ["cash", "Cash"],
-                ["upi", "UPI"],
-                ["bank", "Bank transfer"],
-              ].map(([value, label]) => (
-                <button
-                  type="button"
-                  className={`mode ${paymentMode === value ? "active" : ""}`}
-                  key={value}
-                  onClick={() => setPaymentMode(value)}
-                >
-                  <CreditCard size={17} />
-                  <span>{label}</span>
-                </button>
-              ))}
-            </div>
-          </fieldset>
           {paymentMode === "cash" && (
             <label className="field-label" htmlFor="collector">
               Collected by
@@ -1796,9 +1974,51 @@ function App() {
               />
             </label>
           )}
+          {paymentMode && <div className="payment-mode-confirmation">Payment mode: <strong>{paymentMode === "upi" ? "UPI" : paymentMode === "bank" ? "Bank transfer" : "Cash"}</strong></div>}
+          <div className={`payment-attachment-field ${paymentAttachment ? "has-file" : ""}`}>
+            <div className="payment-attachment-heading">
+              <div className="payment-attachment-icon"><FileImage size={17} /></div>
+              <div>
+                <strong>Payment screenshot</strong>
+                <small>Optional proof · JPG, PNG, WEBP or PDF · max 5 MB</small>
+              </div>
+            </div>
+            <input
+              id="payment-attachment"
+              className="payment-attachment-input"
+              type="file"
+              accept="image/jpeg,image/png,image/webp,application/pdf"
+              onChange={(event) => {
+                selectPaymentAttachment(event.target.files?.[0]);
+                event.target.value = "";
+              }}
+            />
+            {paymentAttachment ? (
+              <div className="payment-attachment-preview">
+                {paymentAttachmentPreview ? (
+                  <img src={paymentAttachmentPreview} alt="Selected payment proof preview" />
+                ) : (
+                  <div className="payment-file-icon"><FileText size={21} /></div>
+                )}
+                <div className="payment-attachment-details">
+                  <strong title={paymentAttachment.name}>{paymentAttachment.name}</strong>
+                  <small>{(paymentAttachment.size / 1024 / 1024).toFixed(2)} MB · ready to upload</small>
+                </div>
+                <button type="button" className="payment-attachment-remove" onClick={clearPaymentAttachment} aria-label="Remove payment screenshot" title="Remove attachment">
+                  <X size={16} />
+                </button>
+              </div>
+            ) : (
+              <label className="payment-attachment-dropzone" htmlFor="payment-attachment">
+                <Upload size={16} />
+                <span>Choose screenshot or proof</span>
+              </label>
+            )}
+          </div>
+          {!flat && <div className="payment-empty-state">Select a flat to begin recording a payment.</div>}
           <button
             className="submit-button"
-            disabled={saving || (!totals.total && !waiveLateFees)}
+            disabled={saving || !paymentMode || (!selectedDueIds.length && !selectedCollectionDueIds.length) || (!totals.total && !waiveLateFees)}
             type="submit"
           >
             {saving ? (
@@ -1806,13 +2026,34 @@ function App() {
             ) : (
               <IndianRupee size={18} />
             )}
-            {saving ? "Recording payment" : "Confirm payment"}
+            {saving
+              ? "Recording payment"
+              : waiveLateFees
+                ? totals.total > 0 ? `Collect ${money(totals.total)} and waive fee` : "Waive late fee"
+                : `Collect ${money(totals.total)}`}
           </button>
           {message && (
             <div className={`message ${message.type}`}>{message.text}</div>
           )}
         </aside>
       </form>
+      {selectedExpense && (
+        <div className="receipt-modal-backdrop" role="presentation" onClick={() => setSelectedExpense(null)}>
+          <section className="receipt-modal expense-detail-modal" role="dialog" aria-modal="true" aria-labelledby="expense-detail-title" onClick={(event) => event.stopPropagation()}>
+            <button className="receipt-modal-close" type="button" onClick={() => setSelectedExpense(null)} aria-label="Close expense details">×</button>
+            <p className="eyebrow">EXPENSE DETAIL</p>
+            <h3 id="expense-detail-title">{selectedExpense.category}</h3>
+            <div className="receipt-detail-grid">
+              <div><span>Amount</span><strong>{money(selectedExpense.amount)}</strong></div>
+              <div><span>Status</span><strong>{selectedExpense.status || "Posted"}</strong></div>
+              <div><span>Source</span><strong>{selectedExpense.sourceName || (selectedExpense.sourceType === "collection" ? "Collection" : "Maintenance")}</strong></div>
+              <div><span>Paid from</span><strong>{selectedExpense.paymentMode === "bank" ? "Bank" : "Cash"}</strong></div>
+              <div><span>Date</span><strong>{displayDate(selectedExpense.expenseDate, { day: "numeric", month: "short", year: "numeric" })}</strong></div>
+              <div><span>Description</span><strong>{selectedExpense.description || "No description"}</strong></div>
+            </div>
+          </section>
+        </div>
+      )}
       {selectedReceipt && (
         <div className="receipt-modal-backdrop" role="presentation" onClick={() => setSelectedReceipt(null)}>
           <section className="receipt-modal" role="dialog" aria-modal="true" aria-labelledby="receipt-title" onClick={(event) => event.stopPropagation()}>
@@ -1839,6 +2080,8 @@ function App() {
             </div>
             {selectedReceipt.notes && <p className="receipt-notes">{selectedReceipt.notes}</p>}
             <div className="receipt-modal-total"><span>Total paid</span><strong>{money(selectedReceipt.amount)}</strong></div>
+            {selectedReceipt.attachment && <button className="receipt-attachment-link" type="button" onClick={() => openPaymentAttachment(selectedReceipt.attachment.url)}>View payment attachment</button>}
+            <button className="receipt-print-button" type="button" onClick={printReceipt}><Download size={15} /> Print receipt</button>
           </section>
         </div>
       )}
