@@ -116,6 +116,14 @@ function presentExpense(row) {
   };
 }
 
+async function recordAudit(client, adminId, action, entityType, entityId, metadata = {}) {
+  await client.query(
+    `INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, metadata)
+     VALUES ($1, $2, $3, $4, $5::jsonb)`,
+    [adminId, action, entityType, entityId, JSON.stringify(metadata)],
+  );
+}
+
 async function ensureCurrentMonthDues() {
   const month = `${new Date().toISOString().slice(0, 7)}-01`;
   await withTransaction(async (client) => {
@@ -235,6 +243,70 @@ app.get('/api/expense-categories', requireAdmin, async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.get('/api/payments', requireAdmin, async (req, res, next) => {
+  const query = String(req.query.q || '').trim();
+  const mode = String(req.query.mode || '').trim();
+  const status = String(req.query.status || 'all').trim();
+  const from = String(req.query.from || '').trim();
+  const to = String(req.query.to || '').trim();
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+  const params = [];
+  const filters = [];
+  if (query) {
+    params.push(`%${query}%`);
+    filters.push(`(f.flat_no ILIKE $${params.length} OR o.full_name ILIKE $${params.length} OR p.receipt_no::text ILIKE $${params.length})`);
+  }
+  if (mode && ['cash', 'upi', 'bank', 'card', 'cheque'].includes(mode)) {
+    params.push(mode);
+    filters.push(`p.payment_mode = $${params.length}`);
+  }
+  if (status !== 'all' && ['posted', 'reversed'].includes(status)) {
+    params.push(status);
+    filters.push(`p.status = $${params.length}`);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(from)) {
+    params.push(from);
+    filters.push(`p.paid_at::date >= $${params.length}`);
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+    params.push(to);
+    filters.push(`p.paid_at::date <= $${params.length}`);
+  }
+  params.push(limit);
+  try {
+    const { rows } = await pool.query(`
+      SELECT p.id, p.receipt_no, p.amount, p.payment_mode, p.status, p.paid_at,
+        p.collected_by_name, f.flat_no, o.full_name AS owner_name,
+        COALESCE((SELECT STRING_AGG(TO_CHAR(d.due_month, 'Mon YYYY'), ', ' ORDER BY d.due_month)
+          FROM payment_allocations pa JOIN maintenance_dues d ON d.id = pa.due_id
+          WHERE pa.payment_id = p.id), '') AS months,
+        COALESCE((SELECT SUM(pa.maintenance_amount) FROM payment_allocations pa WHERE pa.payment_id = p.id), 0) AS maintenance_amount,
+        COALESCE((SELECT SUM(pa.late_fee_amount) FROM payment_allocations pa WHERE pa.payment_id = p.id), 0) AS late_fee_amount
+      FROM payments p
+      JOIN flats f ON f.id = p.flat_id
+      LEFT JOIN flat_owners fo ON fo.flat_id = f.id AND fo.is_primary = TRUE AND fo.valid_to IS NULL
+      LEFT JOIN owners o ON o.id = fo.owner_id
+      ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
+      ORDER BY p.paid_at DESC
+      LIMIT $${params.length}
+    `, params);
+    res.json({ payments: rows.map((row) => ({
+      id: row.id,
+      receiptNo: row.receipt_no,
+      flatNo: row.flat_no,
+      ownerName: row.owner_name,
+      amount: money(row.amount),
+      maintenanceAmount: money(row.maintenance_amount),
+      lateFeeAmount: money(row.late_fee_amount),
+      months: row.months,
+      paymentMode: row.payment_mode,
+      status: row.status,
+      collectedBy: row.collected_by_name,
+      paidAt: row.paid_at,
+    })) });
+  } catch (error) { next(error); }
+});
+
 app.post('/api/expense-categories', requireAdmin, async (req, res, next) => {
   const name = String(req.body.name || '').trim();
   if (!name || name.length > 120) return res.status(400).json({ message: 'Category name is required and must be 120 characters or fewer' });
@@ -330,18 +402,36 @@ app.get('/api/dashboard', requireAdmin, async (_req, res, next) => {
           COALESCE((SELECT SUM(amount) FROM expenses WHERE community_id = $1 AND status = 'posted' AND source_type = 'maintenance' AND payment_mode = 'cash'), 0) AS maintenance_cash_expenses,
           COALESCE((SELECT SUM(amount) FROM expenses WHERE community_id = $1 AND status = 'posted' AND source_type = 'maintenance' AND payment_mode = 'bank'), 0) AS maintenance_bank_expenses,
           (SELECT COUNT(*) FROM maintenance_dues WHERE status NOT IN ('paid', 'advanced_paid', 'waived')) AS pending_maintenance,
-          (SELECT COUNT(*) FROM collection_dues cd JOIN community_collections c ON c.id = cd.collection_id WHERE c.community_id = $1 AND cd.status = 'unpaid') AS pending_collections
+          (SELECT COUNT(*) FROM collection_dues cd JOIN community_collections c ON c.id = cd.collection_id WHERE c.community_id = $1 AND cd.status = 'unpaid') AS pending_collections,
+          (SELECT COUNT(*) FROM maintenance_dues WHERE status IN ('unpaid', 'partially_paid') AND due_month < date_trunc('month', CURRENT_DATE)) AS overdue_maintenance,
+          (SELECT COUNT(*) FROM payments WHERE status = 'posted' AND paid_at::date = CURRENT_DATE) AS payments_today,
+          (SELECT COUNT(*) FROM payments WHERE status = 'posted' AND attachment_name IS NULL) AS payments_without_proof
       `, [communityId]),
       pool.query(`
-        WITH months AS (
+        WITH activity_months AS (
           SELECT date_trunc('month', paid_at)::date AS month FROM payments WHERE status = 'posted'
-          UNION SELECT date_trunc('month', expense_date)::date FROM expenses WHERE community_id = $1 AND status = 'posted'
-        )
-        SELECT months.month,
+          UNION
+          SELECT date_trunc('month', expense_date)::date AS month FROM expenses WHERE community_id = $1 AND status = 'posted'
+        ), bounds AS (
+          SELECT COALESCE(MIN(month), date_trunc('month', CURRENT_DATE)::date) AS first_month
+          FROM activity_months
+        ), months AS (
+          SELECT generate_series(first_month, date_trunc('month', CURRENT_DATE)::date, INTERVAL '1 month')::date AS month
+          FROM bounds
+        ), monthly_flow AS (
+          SELECT months.month,
           COALESCE((SELECT SUM(pa.maintenance_amount + pa.late_fee_amount) FROM payment_allocations pa JOIN payments p ON p.id = pa.payment_id WHERE p.status = 'posted' AND date_trunc('month', p.paid_at)::date = months.month), 0) AS maintenance,
           COALESCE((SELECT SUM(cpa.amount) FROM collection_payment_allocations cpa JOIN payments p ON p.id = cpa.payment_id WHERE p.status = 'posted' AND date_trunc('month', p.paid_at)::date = months.month), 0) AS collections,
           COALESCE((SELECT SUM(amount) FROM expenses WHERE community_id = $1 AND status = 'posted' AND date_trunc('month', expense_date)::date = months.month), 0) AS expenses
-        FROM months ORDER BY months.month DESC
+          FROM months
+        )
+        SELECT month, maintenance, collections, expenses,
+          COALESCE(SUM(maintenance + collections - expenses) OVER (
+            ORDER BY month ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+          ), 0) AS opening_balance,
+          SUM(maintenance + collections - expenses) OVER (ORDER BY month) AS closing_balance
+        FROM monthly_flow
+        ORDER BY month DESC
       `, [communityId]),
       pool.query(`
         SELECT c.id, c.name, c.amount, c.due_date, c.status,
@@ -738,6 +828,14 @@ app.post('/api/payments', requireAdmin, paymentAttachmentUpload.single('attachme
           await client.query(`UPDATE maintenance_dues SET status = $2, updated_at = NOW() WHERE id = $1`, [due.id, refreshedDue.maintenanceDue <= 0 && refreshedDue.lateFee <= 0 ? 'paid' : 'partially_paid']);
         }
       }
+      if (payment.rows[0]) {
+        await recordAudit(client, req.admin.sub, 'payment.created', 'payment', payment.rows[0].id, {
+          amount: total,
+          paymentMode,
+          flatId,
+          attachment: Boolean(req.file),
+        });
+      }
       return { payment: payment.rows[0] || null, flat: flatRows[0], dues: allocations, collectionDues, total };
     });
     res.status(201).json({ success: true, ...result, message: result.total > 0 ? `Payment of ₹${result.total.toLocaleString('en-IN')} recorded.` : 'Late fee waived.' });
@@ -745,6 +843,29 @@ app.post('/api/payments', requireAdmin, paymentAttachmentUpload.single('attachme
     if (req.file?.path) fs.rm(req.file.path, { force: true }, () => {});
     next(error);
   }
+});
+
+app.post('/api/payments/:paymentId/reverse', requireAdmin, async (req, res, next) => {
+  const reason = String(req.body.reason || '').trim();
+  if (!reason) return res.status(400).json({ message: 'A reversal reason is required' });
+  try {
+    await withTransaction(async (client) => {
+      const { rows } = await client.query(`SELECT id, status FROM payments WHERE id = $1 FOR UPDATE`, [req.params.paymentId]);
+      if (!rows[0]) throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
+      if (rows[0].status !== 'posted') throw Object.assign(new Error('Only posted payments can be reversed'), { statusCode: 409 });
+      await client.query(`UPDATE payments SET status = 'reversed', notes = CONCAT(COALESCE(notes || E'\\n', ''), 'Reversed: ', $2) WHERE id = $1`, [req.params.paymentId, reason]);
+      await client.query(`
+        UPDATE maintenance_dues d SET status = CASE
+          WHEN COALESCE((SELECT SUM(pa.maintenance_amount) FROM payment_allocations pa JOIN payments p ON p.id = pa.payment_id WHERE pa.due_id = d.id AND p.status = 'posted'), 0) >= d.amount THEN 'paid'
+          WHEN COALESCE((SELECT SUM(pa.maintenance_amount) FROM payment_allocations pa JOIN payments p ON p.id = pa.payment_id WHERE pa.due_id = d.id AND p.status = 'posted'), 0) > 0 THEN 'partially_paid'
+          ELSE 'unpaid' END, updated_at = NOW()
+        WHERE id IN (SELECT due_id FROM payment_allocations WHERE payment_id = $1)
+      `, [req.params.paymentId]);
+      await client.query(`UPDATE collection_dues SET status = 'unpaid', paid_at = NULL WHERE id IN (SELECT collection_due_id FROM collection_payment_allocations WHERE payment_id = $1)`, [req.params.paymentId]);
+      await recordAudit(client, req.admin.sub, 'payment.reversed', 'payment', req.params.paymentId, { reason });
+    });
+    res.json({ success: true, message: 'Payment reversed.' });
+  } catch (error) { next(error); }
 });
 
 app.use((error, _req, res, _next) => {
@@ -804,6 +925,16 @@ async function start() {
         UNIQUE (community_id, name)
       );
       CREATE INDEX IF NOT EXISTS idx_expenses_community_date ON expenses(community_id, expense_date DESC);
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        actor_id UUID REFERENCES admin_users(id),
+        action VARCHAR(80) NOT NULL,
+        entity_type VARCHAR(80) NOT NULL,
+        entity_id UUID,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id, created_at DESC);
     `);
     await pool.query(`
       INSERT INTO expense_categories (community_id, name)

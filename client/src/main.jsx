@@ -570,6 +570,10 @@ function App() {
   const [selectedReceipt, setSelectedReceipt] = useState(null);
   const [receiptLoading, setReceiptLoading] = useState(false);
   const [selectedExpense, setSelectedExpense] = useState(null);
+  const [paymentSearch, setPaymentSearch] = useState("");
+  const [paymentModeFilter, setPaymentModeFilter] = useState("all");
+  const [paymentSearchResults, setPaymentSearchResults] = useState(null);
+  const [reversingPayment, setReversingPayment] = useState(false);
 
   useEffect(() => {
     if (!paymentAttachment || !paymentAttachment.type.startsWith("image/")) {
@@ -635,6 +639,49 @@ function App() {
     }
   }
 
+  async function searchPayments() {
+    const hasFilters = paymentSearch.trim() || paymentModeFilter !== "all";
+    if (!hasFilters && activeAdminTab === "overview") {
+      setPaymentSearchResults(null);
+      return;
+    }
+    const params = new URLSearchParams({ limit: "100" });
+    if (paymentSearch.trim()) params.set("q", paymentSearch.trim());
+    if (paymentModeFilter !== "all") params.set("mode", paymentModeFilter);
+    try {
+      const response = await fetch(`${API}/payments?${params}`, { headers: adminHeaders() });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Payments could not be loaded");
+      setPaymentSearchResults(data.payments || []);
+    } catch (error) {
+      setMessage({ type: "error", text: error.message });
+    }
+  }
+
+  async function reversePayment() {
+    if (!selectedReceipt || selectedReceipt.status !== "posted") return;
+    const reason = window.prompt("Why is this payment being reversed?");
+    if (!reason?.trim()) return;
+    setReversingPayment(true);
+    try {
+      const response = await fetch(`${API}/payments/${selectedReceipt.id}/reverse`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...adminHeaders() },
+        body: JSON.stringify({ reason: reason.trim() }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Payment could not be reversed");
+      setSelectedReceipt((current) => current ? { ...current, status: "reversed", notes: `Reversed: ${reason.trim()}` } : current);
+      setMessage({ type: "success", text: data.message });
+      await refreshAdminData();
+      await searchPayments();
+    } catch (error) {
+      setMessage({ type: "error", text: error.message });
+    } finally {
+      setReversingPayment(false);
+    }
+  }
+
   async function openPaymentAttachment(attachmentUrl) {
     const popup = window.open("about:blank", "_blank");
     if (!popup) {
@@ -691,6 +738,12 @@ function App() {
   useEffect(() => {
     if (adminLoggedIn && activeAdminTab === "report") loadOutstandingReport(reportMonth);
   }, [adminLoggedIn, activeAdminTab, reportMonth]);
+
+  useEffect(() => {
+    if (!adminLoggedIn || !["overview", "history"].includes(activeAdminTab)) return undefined;
+    const timer = window.setTimeout(searchPayments, 250);
+    return () => window.clearTimeout(timer);
+  }, [adminLoggedIn, activeAdminTab, paymentSearch, paymentModeFilter]);
 
   async function adminLogin(event) {
     event.preventDefault();
@@ -1116,7 +1169,7 @@ function App() {
   }
 
   const transactionItems = [
-    ...(dashboard?.payments || []).map((p) => ({
+    ...((paymentSearchResults ?? dashboard?.payments ?? []).map((p) => ({
       id: p.id,
       type: "maintenance",
       description: `${p.flatNo} · ${p.ownerName}`,
@@ -1126,8 +1179,8 @@ function App() {
       date: p.paidAt,
       details: p.months ? `Paid for: ${p.months}` : "Paid maintenance; month details load after API refresh",
       breakdown: `${money(p.maintenanceAmount || p.amount)} maintenance${p.lateFeeAmount ? ` · ${money(p.lateFeeAmount)} late fee` : ""}`,
-      meta: p.paidAt ? `${displayDate(p.paidAt, { day: "numeric", month: "short", year: "numeric" })} at ${new Date(p.paidAt).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}${p.collectedBy ? ` · Collected by ${p.collectedBy}` : ""}` : "Date unavailable",
-    })),
+      meta: `${p.status === "reversed" ? "REVERSED · " : ""}${p.paidAt ? `${displayDate(p.paidAt, { day: "numeric", month: "short", year: "numeric" })} at ${new Date(p.paidAt).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}` : "Date unavailable"}${p.collectedBy ? ` · Collected by ${p.collectedBy}` : ""}`,
+    }))),
     ...(dashboard?.expenses || []).map((e) => ({
       id: e.id,
       type: "expense",
@@ -1326,6 +1379,11 @@ function App() {
               )}
             </span>
           </div>
+          <div className="dashboard-alerts">
+            <div className={Number(dashboard.summary.overdue_maintenance) ? "alert attention" : "alert"}><CircleAlert size={16} /><span><strong>{dashboard.summary.overdue_maintenance || 0}</strong> overdue maintenance dues</span></div>
+            <div className="alert"><Receipt size={16} /><span><strong>{dashboard.summary.payments_today || 0}</strong> payments recorded today</span></div>
+            <div className={Number(dashboard.summary.payments_without_proof) ? "alert attention" : "alert"}><FileImage size={16} /><span><strong>{dashboard.summary.payments_without_proof || 0}</strong> payments without proof</span></div>
+          </div>
           <div className="dashboard-kpis">
             <div>
               <strong>{money(dashboard.summary.maintenance_collected)}</strong>
@@ -1372,19 +1430,25 @@ function App() {
                     <thead>
                       <tr>
                         <th>Month</th>
+                        <th>Opening balance</th>
                         <th>Maintenance</th>
                         <th>Events</th>
                         <th>Expenses</th>
+                        <th>Carry forward</th>
                       </tr>
                     </thead>
                     <tbody>
                       {dashboard.monthly.map((row) => (
                         <tr key={row.month}>
                           <td>{displayMonth(row.month)}</td>
+                          <td>{money(row.opening_balance)}</td>
                           <td>{money(row.maintenance)}</td>
                           <td>{money(row.collections)}</td>
                           <td className="expense-text">
                             {money(row.expenses)}
+                          </td>
+                          <td className={Number(row.closing_balance) < 0 ? "expense-text" : "balance-text"}>
+                            {money(row.closing_balance)}
                           </td>
                         </tr>
                       ))}
@@ -1444,17 +1508,11 @@ function App() {
                   <div className="dashboard-section-title">Recent transactions</div>
                   <small>{filteredTransactions.length} transaction{filteredTransactions.length === 1 ? "" : "s"}</small>
                 </div>
-                <label className="history-filter">
-                  <span>Month</span>
-                  <input
-                    type="month"
-                    value={historyMonth}
-                    onChange={(event) => {
-                      setHistoryMonth(event.target.value);
-                      setHistoryPage(1);
-                    }}
-                  />
-                </label>
+                <div className="history-filters">
+                  <label className="history-filter"><span>Search</span><input value={paymentSearch} onChange={(event) => setPaymentSearch(event.target.value)} placeholder="Flat, owner, receipt" /></label>
+                  <label className="history-filter"><span>Mode</span><select value={paymentModeFilter} onChange={(event) => setPaymentModeFilter(event.target.value)}><option value="all">All modes</option><option value="cash">Cash</option><option value="upi">UPI</option><option value="bank">Bank</option></select></label>
+                  <label className="history-filter"><span>Month</span><input type="month" value={historyMonth} onChange={(event) => { setHistoryMonth(event.target.value); setHistoryPage(1); }} /></label>
+                </div>
               </div>
               {filteredTransactions.length ? (
                 <div className="expense-list history-list">
@@ -2060,6 +2118,7 @@ function App() {
             <button className="receipt-modal-close" type="button" onClick={() => setSelectedReceipt(null)} aria-label="Close receipt details">×</button>
             <p className="eyebrow">PAYMENT RECEIPT</p>
             <h3 id="receipt-title">Receipt #{selectedReceipt.receiptNo}</h3>
+            {selectedReceipt.status === "reversed" && <div className="message error">This payment has been reversed.</div>}
             <div className="receipt-detail-grid">
               <div><span>Flat</span><strong>{selectedReceipt.flatNo}</strong></div>
               <div><span>Owner</span><strong>{selectedReceipt.ownerName || "Not assigned"}</strong></div>
@@ -2081,7 +2140,10 @@ function App() {
             {selectedReceipt.notes && <p className="receipt-notes">{selectedReceipt.notes}</p>}
             <div className="receipt-modal-total"><span>Total paid</span><strong>{money(selectedReceipt.amount)}</strong></div>
             {selectedReceipt.attachment && <button className="receipt-attachment-link" type="button" onClick={() => openPaymentAttachment(selectedReceipt.attachment.url)}>View payment attachment</button>}
-            <button className="receipt-print-button" type="button" onClick={printReceipt}><Download size={15} /> Print receipt</button>
+            <div className="receipt-actions">
+              <button className="receipt-print-button" type="button" onClick={printReceipt}><Download size={15} /> Save / print PDF</button>
+              {selectedReceipt.status === "posted" && <button className="receipt-reverse-button" type="button" disabled={reversingPayment} onClick={reversePayment}>{reversingPayment ? "Reversing..." : "Reverse payment"}</button>}
+            </div>
           </section>
         </div>
       )}
